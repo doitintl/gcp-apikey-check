@@ -1,0 +1,14 @@
+[project]
+name = "gcp-apikey-check"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-api-python-client>=2.195.0",
+    "google-auth>=2.50.0",
+    "google-cloud-asset>=4.3.0",
+    "google-cloud-monitoring>=2.30.0",
+    "google-cloud-resource-manager>=1.17.0",
+    "rich>=15.0.0",
+]

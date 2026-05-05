@@ -1,0 +1,13 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+gcp-security-scan*csv
+gcp-security-scan*json
+.claude
+
+# Virtual environments
+.venv
