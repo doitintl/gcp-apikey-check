@@ -7,11 +7,12 @@ from typing import Optional
 from google.cloud import asset_v1, resourcemanager_v3
 from google.api_core import exceptions as gcp_exceptions
 
-from models import Finding
-from checks.api_keys import check_api_keys
+from models import Finding, Severity
+from checks.api_keys import check_api_keys, AI_APIS
 from checks.sa_keys import check_sa_keys
 from checks.sa_permissions import check_sa_permissions
 from checks.org_policies import check_org_policies
+from checks.enabled_ai_apis import check_enabled_ai_apis
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,103 @@ class Scanner:
                 ]
             findings.extend(perm_findings)
 
+            logger.info(f"Checking enabled AI APIs in project: {project_id}")
+            findings.extend(check_enabled_ai_apis(project_id))
+
+        # Cross-correlate enabled AI APIs with API key findings to surface elevated risks
+        findings.extend(self._correlate_ai_api_risks(findings))
+
         return findings
+
+    def _correlate_ai_api_risks(self, all_findings: list[Finding]) -> list[Finding]:
+        """Produce elevated findings when enabled AI APIs meet risky API key configurations.
+
+        Two patterns are flagged:
+        1. An unrestricted key (no API scope) in a project where Gemini/Vertex is enabled —
+           that key silently grants access to the AI API to whoever holds it.
+        2. A key explicitly scoped for an AI API plus other non-AI APIs — a single leaked
+           key exposes both AI access and unrelated services.
+        """
+        correlated: list[Finding] = []
+        doc_url = "https://cloud.google.com/docs/authentication/api-keys-best-practices"
+
+        # Build map: project_id -> set of enabled AI API names
+        ai_enabled: dict[str, set[str]] = {}
+        for f in all_findings:
+            if f.check_name in ("GEMINI_API_ENABLED", "VERTEX_AI_API_ENABLED"):
+                ai_enabled.setdefault(f.project_id, set()).add(f.details["api_name"])
+
+        if not ai_enabled:
+            return correlated
+
+        # Avoid duplicating correlated findings if called more than once
+        correlated_keys: set[tuple] = set()
+
+        for f in all_findings:
+            if f.project_id not in ai_enabled:
+                continue
+            enabled_apis = ai_enabled[f.project_id]
+
+            # Pattern 1: unrestricted key in a project with enabled AI APIs
+            if f.check_name == "API_KEY_NO_API_RESTRICTION":
+                dedup = ("AI_API_UNSCOPED_KEY_RISK", f.resource_name)
+                if dedup not in correlated_keys:
+                    correlated_keys.add(dedup)
+                    correlated.append(Finding(
+                        severity=Severity.HIGH,
+                        project_id=f.project_id,
+                        resource_name=f.resource_name,
+                        check_name="AI_API_UNSCOPED_KEY_RISK",
+                        description=(
+                            f'API key "{f.details.get("display_name")}" has no API restrictions, '
+                            f"and {sorted(enabled_apis)} {'are' if len(enabled_apis) > 1 else 'is'} "
+                            f'enabled in project "{f.project_id}". '
+                            "This key can silently make Gemini/Vertex AI calls and incur charges."
+                        ),
+                        recommendation=(
+                            "Restrict this key to the specific APIs it actually needs. "
+                            "If AI usage is unintended for this key, also consider disabling "
+                            "the AI API in this project to eliminate the risk entirely."
+                        ),
+                        doc_url=doc_url,
+                        details={
+                            **f.details,
+                            "enabled_ai_apis": sorted(enabled_apis),
+                        },
+                    ))
+
+            # Pattern 2: key scoped for AI API + other non-AI APIs (broad blast radius)
+            elif f.check_name == "API_KEY_AI_SCOPE":
+                ai_api = f.details.get("ai_api", "")
+                all_apis = set(f.details.get("api_services", []))
+                non_ai_apis = sorted(all_apis - AI_APIS)
+                if non_ai_apis:
+                    dedup = ("AI_API_BROAD_KEY_SCOPE", f.resource_name, ai_api)
+                    if dedup not in correlated_keys:
+                        correlated_keys.add(dedup)
+                        correlated.append(Finding(
+                            severity=Severity.HIGH,
+                            project_id=f.project_id,
+                            resource_name=f.resource_name,
+                            check_name="AI_API_BROAD_KEY_SCOPE",
+                            description=(
+                                f'API key "{f.details.get("display_name")}" is scoped for '
+                                f"{ai_api} (enabled in this project) plus other APIs: {non_ai_apis}. "
+                                "A single leaked key exposes both AI access and those additional services."
+                            ),
+                            recommendation=(
+                                "Create a dedicated key restricted solely to the AI API. "
+                                "Move the other API calls to a separate key with appropriate restrictions."
+                            ),
+                            doc_url=doc_url,
+                            details={
+                                **f.details,
+                                "enabled_ai_apis": sorted(enabled_apis),
+                                "non_ai_apis": non_ai_apis,
+                            },
+                        ))
+
+        return correlated
 
     def _list_projects(self, org_id: str) -> tuple[list[str], dict[str, str]]:
         """List all active projects under the org via Cloud Asset Inventory.
