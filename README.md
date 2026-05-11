@@ -11,7 +11,7 @@ See Google Docs:
 
 ---
 
-> **Use at your own risk.** This software is provided as-is, with no warranties of any kind and no support. See the [MIT License](#license) below.
+> **This software is provided as-is, with no warranties of any kind and no support.** See the [MIT License](#license) below.
 
 ---
 

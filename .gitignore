@@ -11,3 +11,4 @@ gcp-security-scan*json
 
 # Virtual environments
 .venv
+blog.md
