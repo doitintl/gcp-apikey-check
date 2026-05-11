@@ -90,6 +90,11 @@ Examples:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    # Suppress noisy httplib2 transport warnings from google-api-python-client.
+    # These are informational only and not actionable — httplib2 is a transitive
+    # dependency used internally by the client library.
+    logging.getLogger("google_auth_httplib2").setLevel(logging.ERROR)
+
     scanner = Scanner(
         org_id=args.org_id,
         project_id=args.project_id,
