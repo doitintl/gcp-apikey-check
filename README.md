@@ -44,6 +44,9 @@ See Google Docs:
 - `ORG_SA_KEY_CREATION_ALLOWED` — `iam.disableServiceAccountKeyCreation` not enforced [HIGH]
 - `ORG_SA_KEY_UPLOAD_ALLOWED` — `iam.disableServiceAccountKeyUpload` not enforced [MED]
 
+**AI APIs** (informational, via Cloud Asset Inventory)
+- `GEMINI_API_ENABLED` / `VERTEX_AI_API_ENABLED` — project has an AI API enabled [INFO]. Detected in a single org-wide Asset Inventory query, and cross-correlated with unrestricted/broadly-scoped API keys to raise `AI_API_UNSCOPED_KEY_RISK` / `AI_API_BROAD_KEY_SCOPE`.
+
 ---
 
 ## Install
@@ -67,6 +70,16 @@ The identity used must have at minimum:
 - `roles/iam.securityReviewer` (per project)
 - `roles/monitoring.viewer` (per project)
 - `roles/orgpolicy.policyViewer` (org level, for org scans)
+
+**Quota project / enabled APIs.** The IAM, Cloud Resource Manager, and Org Policy checks are billed against your ADC *quota project*. These APIs must be enabled **on that quota project** or the affected checks are skipped — and reported under **Scan coverage** rather than silently dropped:
+
+`cloudasset.googleapis.com`, `cloudresourcemanager.googleapis.com`, `iam.googleapis.com`, `monitoring.googleapis.com`, and (org scans) `orgpolicy.googleapis.com`.
+
+If a run shows `API disabled` skips, enable those APIs on the quota project or point ADC at one that has them:
+
+```bash
+gcloud auth application-default set-quota-project PROJECT_ID
+```
 
 ---
 
@@ -95,9 +108,14 @@ uv run gcpkeyscan.py --org-id 123456789 --output json --output-dir ./reports
 | `--output-dir DIR` | `.` | Directory for output files |
 | `--include-google-sas` | off | Include Google-managed service agents in permission findings (noisy; not actionable) |
 | `--all-sa-permissions` | off | Check permissions for all SAs, not just those with user-managed keys |
-| `--verbose / -v` | off | Show API call details and warnings |
+| `--max-workers N` | `10` | Concurrent worker threads for per-project checks (SA keys + permissions) |
+| `--verbose / -v` | off | Show per-scope skip detail and retry diagnostics |
 
-Output files are written as `gcp-security-scan-<timestamp>.json` / `.csv`.
+Output files are written as `gcp-security-scan-<timestamp>.json` / `.csv`. The JSON wraps the findings with run metadata and a `coverage` block (scope, project count, duration, and any skipped checks by reason).
+
+### Scan coverage
+
+At organization scope a scan touches thousands of projects, and many will legitimately deny access or have an API disabled. Rather than swallowing those failures into an empty, falsely-clean result, every failure is classified and summarised in a **Scan coverage** panel at the end of the run (and in the JSON `coverage` block). Per-project checks run concurrently with a live progress bar and ETA; transient/quota errors are retried with backoff. **"No actionable findings" now means the scan completed — check the coverage panel to confirm nothing was skipped.**
 
 ---
 

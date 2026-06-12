@@ -5,9 +5,10 @@ import logging
 from typing import Any
 
 from google.cloud import asset_v1
-from google.api_core import exceptions as gcp_exceptions
 
+from gcp_errors import with_retry
 from models import Finding, Severity
+from scan_context import ScanContext
 
 logger = logging.getLogger(__name__)
 
@@ -50,39 +51,41 @@ DOC_API_KEYS = "https://cloud.google.com/docs/authentication/api-keys-best-pract
 DOC_MAPS = "https://developers.google.com/maps/api-security-best-practices"
 
 
-def check_api_keys(scope: str, num_to_id: dict[str, str] | None = None) -> list[Finding]:
+def check_api_keys(
+    ctx: ScanContext, scope: str, num_to_id: dict[str, str] | None = None
+) -> list[Finding]:
     """Scan all API keys in scope (org or project) for security issues.
 
     num_to_id maps numeric project numbers to human-readable project IDs so
     findings display 'my-project' instead of '306419495665'.
     """
     findings = []
-    client = asset_v1.AssetServiceClient()
     num_to_id = num_to_id or {}
 
-    try:
-        request = asset_v1.ListAssetsRequest(
-            parent=scope,
-            asset_types=["apikeys.googleapis.com/Key"],
-            content_type=asset_v1.ContentType.RESOURCE,
-            page_size=500,
-        )
-        for asset in client.list_assets(request=request):
-            if not asset.resource or not asset.resource.data:
-                continue
-            # proto-plus wraps Struct as MapComposite; serialize via JSON to get a plain dict
-            asset_dict = json.loads(type(asset).to_json(asset))
-            key_data = asset_dict.get("resource", {}).get("data", {})
-            project_num = _project_from_asset_name(asset.name)
-            # Show the slug (e.g. "johnd-test-01") if we can resolve it;
-            # resource_name retains the original numeric path for traceability.
-            project_id = num_to_id.get(project_num, project_num)
-            findings.extend(_check_single_key(project_id, asset.name, key_data))
+    request = asset_v1.ListAssetsRequest(
+        parent=scope,
+        asset_types=["apikeys.googleapis.com/Key"],
+        content_type=asset_v1.ContentType.RESOURCE,
+        page_size=500,
+    )
 
-    except gcp_exceptions.PermissionDenied as e:
-        logger.warning(f"Permission denied scanning API keys in {scope}: {e}")
-    except gcp_exceptions.InvalidArgument as e:
-        logger.warning(f"Invalid scope for API key scan ({scope}): {e}")
+    try:
+        assets = with_retry(lambda: list(ctx.asset_client.list_assets(request=request)))
+    except Exception as exc:  # noqa: BLE001 — classified and recorded, not swallowed
+        ctx.skips.record(scope, "api_keys", exc)
+        return findings
+
+    for asset in assets:
+        if not asset.resource or not asset.resource.data:
+            continue
+        # proto-plus wraps Struct as MapComposite; serialize via JSON to get a plain dict
+        asset_dict = json.loads(type(asset).to_json(asset))
+        key_data = asset_dict.get("resource", {}).get("data", {})
+        project_num = _project_from_asset_name(asset.name)
+        # Show the slug (e.g. "johnd-test-01") if we can resolve it;
+        # resource_name retains the original numeric path for traceability.
+        project_id = num_to_id.get(project_num, project_num)
+        findings.extend(_check_single_key(project_id, asset.name, key_data))
 
     return findings
 

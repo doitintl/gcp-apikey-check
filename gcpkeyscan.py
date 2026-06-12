@@ -78,17 +78,21 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Concurrent worker threads for per-project checks (default: 10).",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Enable verbose logging (shows API calls and warnings).",
+        help="Enable verbose logging (shows per-scope skip detail and retries).",
     )
 
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+    _configure_logging(args.verbose)
 
     scanner = Scanner(
         org_id=args.org_id,
@@ -97,13 +101,33 @@ Examples:
         usage_days=args.usage_days,
         suppress_google_sas=not args.include_google_sas,
         all_sa_permissions=args.all_sa_permissions,
+        max_workers=args.max_workers,
     )
 
-    findings = scanner.run()
+    result = scanner.run()
 
-    report = Report(findings, output_dir=args.output_dir)
+    report = Report(result, output_dir=args.output_dir)
     report.print_console()
     report.save(args.output)
+
+
+def _configure_logging(verbose: bool):
+    """Quiet the noisy Google client libraries.
+
+    At org scale a large fraction of projects legitimately 403, and the
+    google-api-python-client transport logs every one of those at WARNING.
+    That spew is what made the tool feel broken — failures are now classified
+    and summarised in the coverage panel instead, so we silence the raw chatter.
+    With -v, our own DEBUG skip/retry detail is shown, but the library transport
+    stays quiet regardless.
+    """
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    for noisy in ("googleapiclient", "googleapiclient.http", "googleapiclient.discovery_cache",
+                  "google.auth", "google.api_core", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.ERROR)
 
 
 if __name__ == "__main__":
