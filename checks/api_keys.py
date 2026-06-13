@@ -190,17 +190,29 @@ def _check_single_key(
             details=base_details,
         ))
 
-    # AI API keys — these should use service accounts instead
+    # AI API keys — these should use service accounts instead.
+    # Severity is MED when an app restriction (e.g. IP allowlist) is present,
+    # because the key's blast radius is meaningfully reduced; HIGH otherwise.
     for ai_api in sorted(api_services & AI_APIS):
+        if has_app_restriction:
+            ai_sev = Severity.MED
+            ai_desc = (
+                f'API key "{display_name}" is scoped for {ai_api} '
+                "and has an application restriction, which reduces exposure. "
+                "AI API keys are still high-value targets — prefer a service account."
+            )
+        else:
+            ai_sev = Severity.HIGH
+            ai_desc = (
+                f'API key "{display_name}" is scoped for {ai_api}. '
+                "AI API keys are high-value targets that can generate significant charges if leaked."
+            )
         findings.append(Finding(
-            severity=Severity.HIGH,
+            severity=ai_sev,
             project_id=project_id,
             resource_name=resource_name,
             check_name="API_KEY_AI_SCOPE",
-            description=(
-                f'API key "{display_name}" is scoped for {ai_api}. '
-                "AI API keys are high-value targets that can generate significant charges if leaked."
-            ),
+            description=ai_desc,
             recommendation=(
                 "Use a service account with Workload Identity Federation instead of an API key "
                 "for Gemini/Vertex AI. If an API key is required, restrict it to a specific IP "
@@ -213,17 +225,20 @@ def _check_single_key(
     # Firebase keys — designed to be public, so only flag when missing app restrictions
     # or combined with AI APIs (the specific high-risk combination).
     # Properly restricted Firebase-only keys are expected and not a finding.
+    # Both cases are CRITICAL: Firebase keys are routinely embedded in public frontend
+    # assets, so either condition exposes the key to the entire internet.
     if is_firebase_key and (not has_app_restriction or is_ai_key):
         findings.append(Finding(
-            severity=Severity.HIGH,
+            severity=Severity.CRITICAL,
             project_id=project_id,
             resource_name=resource_name,
             check_name="API_KEY_FIREBASE_SCOPE",
             description=(
                 f'API key "{display_name}" is scoped for Firebase APIs'
-                + (" and AI APIs — Firebase keys are routinely embedded in frontend code, "
-                   "which would expose your AI API access." if is_ai_key
-                   else " without application restrictions.")
+                + (" and AI APIs — Firebase keys are routinely embedded in public frontend code, "
+                   "which exposes your AI API access to anyone who inspects the page." if is_ai_key
+                   else " without application restrictions. Firebase keys are routinely embedded "
+                        "in public frontend code, making an unrestricted key fully public.")
             ),
             recommendation=(
                 "Ensure this key has HTTP referrer or Android/iOS app restrictions. "
