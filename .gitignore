@@ -5,8 +5,11 @@ build/
 dist/
 wheels/
 *.egg-info
-gcp-security-scan*csv
-gcp-security-scan*json
+# Scan output — never commit results; they can contain sensitive resource
+# names (SA emails, project IDs, key resource paths). No leading slash, so
+# these match in any output directory (e.g. --output-dir reports/).
+gcp-security-scan-*.json
+gcp-security-scan-*.csv
 .claude
 
 # Virtual environments

@@ -2,11 +2,11 @@
 
 import logging
 
-import google.auth
-import googleapiclient.discovery
 from googleapiclient.errors import HttpError
 
+from gcp_errors import with_retry
 from models import Finding, Severity
+from scan_context import ScanContext
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +38,15 @@ CONSTRAINTS = {
 }
 
 
-def check_org_policies(org_id: str) -> list[Finding]:
+def check_org_policies(ctx: ScanContext, org_id: str) -> list[Finding]:
     """Check that key governance org policies are enforced."""
     findings = []
 
-    credentials, _ = google.auth.default()
-    orgpolicy = googleapiclient.discovery.build(
-        "orgpolicy", "v2", credentials=credentials, cache_discovery=False
-    )
+    orgpolicy = ctx.orgpolicy
 
     for constraint_id, (severity, check_name, description, recommendation) in CONSTRAINTS.items():
         policy_name = f"organizations/{org_id}/policies/{constraint_id}"
-        enforced = _is_enforced(orgpolicy, policy_name)
+        enforced = _is_enforced(ctx, orgpolicy, policy_name)
 
         if enforced is False:
             findings.append(Finding(
@@ -66,22 +63,24 @@ def check_org_policies(org_id: str) -> list[Finding]:
     return findings
 
 
-def _is_enforced(orgpolicy, policy_name: str) -> bool | None:
+def _is_enforced(ctx: ScanContext, orgpolicy, policy_name: str) -> bool | None:
     """Return True if enforced, False if not set (policy absent = not enforced), None if indeterminate.
 
     None means the check could not be completed (permission denied, transient error, etc.)
     and should not produce a finding.
     """
     try:
-        policy = orgpolicy.organizations().policies().get(name=policy_name).execute()
+        policy = with_retry(
+            lambda: orgpolicy.organizations().policies().get(name=policy_name).execute()
+        )
         rules = policy.get("spec", {}).get("rules", [])
         return any(rule.get("enforce") is True for rule in rules)
-    except HttpError as e:
-        if e.resp.status == 404:
+    except HttpError as exc:
+        if exc.resp.status == 404:
             # Policy not set at all → constraint is not enforced
             return False
-        logger.warning(f"Could not check policy {policy_name}: HTTP {e.resp.status}")
+        ctx.skips.record(policy_name, "org_policies", exc)
         return None
-    except Exception as e:
-        logger.warning(f"Could not check policy {policy_name}: {e}")
+    except Exception as exc:  # noqa: BLE001
+        ctx.skips.record(policy_name, "org_policies", exc)
         return None

@@ -4,45 +4,44 @@ import logging
 import time
 from datetime import datetime, timezone
 
-import google.auth
-import googleapiclient.discovery
 from google.cloud import monitoring_v3
-from google.api_core import exceptions as gcp_exceptions
 
+from gcp_errors import with_retry
 from models import Finding, Severity
+from scan_context import ScanContext
 
 logger = logging.getLogger(__name__)
 
 DOC_URL = "https://cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys"
 
 
-def check_sa_keys(project_id: str, key_age_days: int, usage_days: int) -> list[Finding]:
+def check_sa_keys(ctx: ScanContext, project_id: str, key_age_days: int, usage_days: int) -> list[Finding]:
     """Check all user-managed SA keys in a project for age and usage issues."""
     findings = []
 
-    credentials, _ = google.auth.default()
-    iam = googleapiclient.discovery.build("iam", "v1", credentials=credentials, cache_discovery=False)
+    iam = ctx.iam()
+    scope = f"projects/{project_id}"
 
     # Fetch usage metrics once per project — maps key_id → last active date string
-    key_last_used, monitoring_ok = _get_key_last_used(project_id, usage_days)
+    key_last_used, monitoring_ok = _get_key_last_used(ctx, project_id, usage_days)
 
     # Paginate through all service accounts in the project
-    service_accounts = _list_all_service_accounts(iam, project_id)
+    service_accounts = _list_all_service_accounts(ctx, iam, project_id)
 
     for sa in service_accounts:
         sa_email = sa["email"]
         sa_name = sa["name"]
 
         try:
-            keys_resp = (
+            keys_resp = with_retry(lambda: (
                 iam.projects()
                 .serviceAccounts()
                 .keys()
                 .list(name=sa_name, keyTypes=["USER_MANAGED"])
                 .execute()
-            )
-        except Exception as e:
-            logger.warning(f"Cannot list keys for {sa_email}: {e}")
+            ))
+        except Exception as exc:  # noqa: BLE001
+            ctx.skips.record(scope, "sa_keys:list_keys", exc)
             continue
 
         user_keys = keys_resp.get("keys", [])
@@ -152,7 +151,7 @@ def _age_findings(
     )]
 
 
-def _get_key_last_used(project_id: str, usage_days: int) -> tuple[dict[str, str], bool]:
+def _get_key_last_used(ctx: ScanContext, project_id: str, usage_days: int) -> tuple[dict[str, str], bool]:
     """Query Cloud Monitoring for the most recent authentication event per SA key.
 
     Returns ({key_id: 'YYYY-MM-DD'}, monitoring_ok).
@@ -162,7 +161,7 @@ def _get_key_last_used(project_id: str, usage_days: int) -> tuple[dict[str, str]
     key_last_used: dict[str, str] = {}
 
     try:
-        client = monitoring_v3.MetricServiceClient()
+        client = ctx.monitoring_client
 
         end_time = time.time()
         start_time = end_time - (usage_days * 86400)
@@ -186,7 +185,8 @@ def _get_key_last_used(project_id: str, usage_days: int) -> tuple[dict[str, str]
             view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL,
         )
 
-        for ts in client.list_time_series(request=request):
+        series = with_retry(lambda: list(client.list_time_series(request=request)))
+        for ts in series:
             key_id = ts.metric.labels.get("key_id", "")
             if not key_id:
                 continue
@@ -206,25 +206,22 @@ def _get_key_last_used(project_id: str, usage_days: int) -> tuple[dict[str, str]
 
         return key_last_used, True
 
-    except gcp_exceptions.PermissionDenied:
-        logger.warning(f"Permission denied reading monitoring metrics for {project_id}")
-    except Exception as e:
-        logger.warning(f"Could not fetch SA key usage metrics for {project_id}: {e}")
-
-    return {}, False
+    except Exception as exc:  # noqa: BLE001
+        ctx.skips.record(f"projects/{project_id}", "sa_keys:usage_metrics", exc)
+        return {}, False
 
 
-def _list_all_service_accounts(iam, project_id: str) -> list[dict]:
+def _list_all_service_accounts(ctx: ScanContext, iam, project_id: str) -> list[dict]:
     """List all service accounts in a project, handling pagination."""
     accounts = []
     try:
         request = iam.projects().serviceAccounts().list(name=f"projects/{project_id}")
         while request is not None:
-            resp = request.execute()
+            resp = with_retry(request.execute)
             accounts.extend(resp.get("accounts", []))
             request = iam.projects().serviceAccounts().list_next(request, resp)
-    except Exception as e:
-        logger.warning(f"Cannot list service accounts for {project_id}: {e}")
+    except Exception as exc:  # noqa: BLE001
+        ctx.skips.record(f"projects/{project_id}", "sa_keys:list_service_accounts", exc)
     return accounts
 
 
